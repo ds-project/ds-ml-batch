@@ -4,48 +4,61 @@
 # 2. Upload the file to an Azure blob - you"d need an Azure storage account
 # 3. Call BES to process the data in the blob. 
 # 4. The results get written to another Azure blob.
-
 # 5. Download the output blob to a local file
-#
+# 6. Insert output data on mysql.
 # Note: You may need to download/install the Azure SDK for Python.
 # See: http://azure.microsoft.com/en-us/documentation/articles/python-how-to-install/
 
-import urllib2
-# If you are using Python 3+, import urllib instead of urllib2
-
+import urllib.request
+import os
 import json
 import time
-from azure.storage.blob import *
-
-def printHttpError(httpError):
-    print("The request failed with status code: " + str(httpError.code))
-
-    # Print the headers - they include the requert ID and the timestamp, which are useful for debugging the failure
-    print(httpError.info())
-
-    print(json.loads(httpError.read()))
-    return
+import pymysql
+from azure.storage.blob import BlockBlobService, ContentSettings
 
 
 def saveBlobToFile(blobUrl, resultsLabel):
     output_file = "myresults.csv" # Replace this with the location you would like to use for your output file
     print("Reading the result from " + blobUrl)
     try:
-        # If you are using Python 3+, replace urllib2 with urllib.request in the following code
-        response = urllib2.urlopen(blobUrl)
-    except urllib2.HTTPError, error:
-        printHttpError(error)
+        response = urllib.request.urlopen(blobUrl)
+    except urllib.error.HTTPError as error:
+        print(error.reason)
         return
 
+    result_csv = response.read().decode('utf-8')
     with open(output_file, "w+") as f:
-        f.write(response.read())
+        f.write(result_csv)
     print(resultsLabel + " have been written to the file " + output_file)
+
+    # start putting on mysql
+    print('putting on mysql...')
+    mysql_host = '<mysql_host>'
+    mysql_user = '<mysql_user>'
+    mysql_password = '<mysql_password>'
+    mysql_db = '<mysql_db>'
+    conn = pymysql.connect(host=mysql_host, user=mysql_user, password=mysql_password, db=mysql_db)
+    cur = conn.cursor()
+    result_list = result_csv.split('\n')[1:]
+    for row in result_list:
+        columns = row.split(',')
+        if len(columns) <= 1:
+            continue
+	
+	# both column[5] and column[6] are string.
+        columns[5] = "'" + columns[5] + "'"
+        columns[6] = "'" + columns[6] + "'"
+        sql_stmt = "INSERT INTO user_churn VALUES ({})".format(",".join(columns))
+        print(sql_stmt)
+        cur.execute(sql_stmt)
+    
+    conn.commit()
+    cur.close()
+    conn.close()
     return
 
 
 def processResults(result):
-
-
     first = True
     results = result["Results"]
     for outputName in results:
@@ -67,29 +80,31 @@ def processResults(result):
     return
 
 
-
 def uploadFileToBlob(input_file, input_blob_name, storage_container_name, storage_account_name, storage_account_key):
-    blob_service = BlobService(account_name=storage_account_name, account_key=storage_account_key)
+    block_blob_service = BlockBlobService(account_name=storage_account_name, account_key=storage_account_key)
 
     print("Uploading the input to blob storage...")
-    data_to_upload = open(input_file, "r").read()
-    blob_service.put_blob(storage_container_name, input_blob_name, data_to_upload, x_ms_blob_type="BlockBlob")
+    block_blob_service.create_blob_from_path(
+        storage_container_name,
+        input_blob_name,
+        input_file,
+        content_settings=ContentSettings(content_type='plain/txt')
+    )
+
 
 def invokeBatchExecutionService():
-
-    storage_account_name = "dsproject00998570" # Replace this with your Azure Storage Account name
-    storage_account_key = "<StorageKey>" # Replace this with your Azure Storage Key
-    storage_container_name = "ds-batch" # Replace this with your Azure Storage Container name
+    storage_account_name = "<storage_account_name>" # Replace this with your Azure Storage Account name
+    storage_account_key = "<storage_account_key>" # Replace this with your Azure Storage Key
+    storage_container_name = "<storage_container_name>" # Replace this with your Azure Storage Container name
     connection_string = "DefaultEndpointsProtocol=https;AccountName=" + storage_account_name + ";AccountKey=" + storage_account_key
-    api_key = "<API-KEY>" # Replace this with the API key for the web service
+    api_key = "<api_key>" # Replace this with the API key for the web service
     url = "https://asiasoutheast.services.azureml.net/workspaces/46d0e60b05b34558827abd41f11d204f/services/7e2a0a94ed4d40c1965b523707feea59/jobs"
 
     uploadFileToBlob("game_data_utf_8_eng.csv", # Replace this with the location of your input file
-                     "game_data_utf_8_eng.csv", # Replace this with the name you would like to use for your Azure blob; this needs to have the same extension as the input file 
+                     "input1datablob.csv", # Replace this with the name you would like to use for your Azure blob; this needs to have the same extension as the input file 
                      storage_container_name, storage_account_name, storage_account_key)
 
     payload =  {
-
         "Inputs": {
 
             "input1": { "ConnectionString": connection_string, "RelativeLocation": "/" + storage_container_name + "/input1datablob.csv" },
@@ -99,53 +114,47 @@ def invokeBatchExecutionService():
 
             "output1": { "ConnectionString": connection_string, "RelativeLocation": "/" + storage_container_name + "/output1results.csv" },
         },
-        "GlobalParameters": {
-}
+        "GlobalParameters": {}
     }
 
     body = str.encode(json.dumps(payload))
     headers = { "Content-Type":"application/json", "Authorization":("Bearer " + api_key)}
     print("Submitting the job...")
 
-    # If you are using Python 3+, replace urllib2 with urllib.request in the following code
-
     # submit the job
-    req = urllib2.Request(url + "?api-version=2.0", body, headers)
+    req = urllib.request.Request(url + "?api-version=2.0", body, headers)
     try:
-        response = urllib2.urlopen(req)
-    except urllib2.HTTPError, error:
-        printHttpError(error)
+        response = urllib.request.urlopen(req)
+    except urllib.error.HTTPError as error:
+        print('@', error.reason)
         return
 
-    result = response.read()
+    result = response.read().decode('utf-8')
     job_id = result[1:-1] # remove the enclosing double-quotes
     print("Job ID: " + job_id)
 
-
-    # If you are using Python 3+, replace urllib2 with urllib.request in the following code
     # start the job
     print("Starting the job...")
-    req = urllib2.Request(url + "/" + job_id + "/start?api-version=2.0", "", headers)
+    req = urllib.request.Request(url + "/" + job_id + "/start?api-version=2.0", data="".encode("utf-8"), headers=headers)
     try:
-        response = urllib2.urlopen(req)
-    except urllib2.HTTPError, error:
-        printHttpError(error)
+        response = urllib.request.urlopen(req)
+    except urllib.error.HTTPError as error:
+        print('@', error.reason)
         return
-
+    
     url2 = url + "/" + job_id + "?api-version=2.0"
-
     while True:
         print("Checking the job status...")
 	    # If you are using Python 3+, replace urllib2 with urllib.request in the follwing code
-        req = urllib2.Request(url2, headers = { "Authorization":("Bearer " + api_key) })
+        req = urllib.request.Request(url2, headers = { "Authorization":("Bearer " + api_key) })
 
         try:
-            response = urllib2.urlopen(req)
-        except urllib2.HTTPError, error:
-            printHttpError(error)
+            response = urllib.request.urlopen(req)
+        except urllib.error.HTTPError as error:
+            print(error.reason)
             return    
 
-        result = json.loads(response.read())
+        result = json.loads(response.read().decode('utf-8'))
         status = result["StatusCode"]
         if (status == 0 or status == "NotStarted"):
             print("Job " + job_id + " not yet started...")
@@ -166,4 +175,10 @@ def invokeBatchExecutionService():
         time.sleep(1) # wait one second
     return
 
+
 invokeBatchExecutionService()
+
+postreqdata = json.loads(open(os.environ['req']).read())
+response = open(os.environ['res'], 'w')
+response.write("Success Batch Job")
+response.close()
